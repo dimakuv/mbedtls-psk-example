@@ -13,28 +13,23 @@ int main(void) {
 }
 #else
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <immintrin.h>
 #include <inttypes.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/net_sockets.h"  /* used only for error codes */
 #include "mbedtls/ssl.h"
-
-#define PORT_BE 0x1151      /* 4433 */
-#define PORT_LE 0x5111
-#define ADDR_BE 0x7f000001  /* 127.0.0.1 */
-#define ADDR_LE 0x0100007f
 
 #define GET_REQUEST "GET / HTTP/1.0\r\n\r\n"
 
@@ -44,13 +39,7 @@ const unsigned char psk[] = {
 };
 const char psk_id[] = "Client_identity";
 
-enum _mbedtls_net_errors {
-    MBEDTLS_ERR_NET_OK = 0,
-    MBEDTLS_ERR_NET_INVALID_CONTEXT,
-    MBEDTLS_ERR_NET_CONN_RESET,
-    MBEDTLS_ERR_NET_RECV_FAILED,
-    MBEDTLS_ERR_NET_SEND_FAILED
-};
+const char unix_socket_name[] = "mbedtls_test_unix_socket";
 
 enum exit_codes {
     exit_ok = 0,
@@ -63,6 +52,7 @@ enum exit_codes {
     x509_crt_parse_failed,
     ssl_handshake_failed,
     ssl_write_failed,
+    ssl_read_failed
 };
 
 static int recv_cb(void *ctx, unsigned char *buf, size_t len) {
@@ -124,9 +114,10 @@ int main(void) {
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
 
-    mbedtls_ctr_drbg_init(&ctr_drbg);
+	signal(SIGPIPE, SIG_IGN);
 
     /* initialize and setup mbedtls objects */
+    mbedtls_ctr_drbg_init(&ctr_drbg);
     mbedtls_ssl_init(&ssl);
     mbedtls_ssl_config_init(&conf);
 
@@ -152,15 +143,12 @@ int main(void) {
     }
 
     /* start the connection */
-    struct sockaddr_in addr;
+    struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
-    ret = 1; /* for endianness detection */
-    addr.sin_family = AF_INET;
-    addr.sin_port = *((char *) &ret) == ret ? PORT_LE : PORT_BE;
-    addr.sin_addr.s_addr = *((char *) &ret) == ret ? ADDR_LE : ADDR_BE;
-    ret = 0;
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, unix_socket_name, sizeof(addr.sun_path)-1);
 
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((server_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
         ret = socket_failed;
         goto exit;
     }
@@ -177,11 +165,21 @@ int main(void) {
         goto exit;
     }
 
-    /* write the GET request and close the connection */
     if (mbedtls_ssl_write(&ssl, (const uint8_t*)GET_REQUEST, sizeof(GET_REQUEST) - 1) <= 0) {
         ret = ssl_write_failed;
         goto exit;
     }
+
+    unsigned char buf[200];
+    int bytes_read = 0;
+    if ((bytes_read = mbedtls_ssl_read(&ssl, buf, sizeof(buf) - 1)) <= 0) {
+        ret = ssl_read_failed;
+        goto exit;
+    };
+    buf[bytes_read - 1] = '\0';
+
+    mbedtls_printf("Reply from server:\n%s\n", buf);
+    fflush(stdout);
 
     mbedtls_ssl_close_notify(&ssl);
 

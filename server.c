@@ -14,24 +14,24 @@ int main(void) {
 }
 #else
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <immintrin.h>
 #include <inttypes.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/debug.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/error.h"
+#include "mbedtls/net_sockets.h"  /* used only for error codes */
 #include "mbedtls/ssl.h"
 #include "mbedtls/timing.h"
 
@@ -47,19 +47,6 @@ int main(void) {
 /* size of the basic I/O buffer, able to hold our default response */
 #define DFL_IO_BUF_LEN 200
 
-enum _mbedtls_net_errors {
-    MBEDTLS_ERR_NET_OK = 0,
-    MBEDTLS_ERR_NET_INVALID_CONTEXT,
-    MBEDTLS_ERR_NET_CONN_RESET,
-    MBEDTLS_ERR_NET_RECV_FAILED,
-    MBEDTLS_ERR_NET_SEND_FAILED,
-    MBEDTLS_ERR_NET_SOCKET_FAILED,
-    MBEDTLS_ERR_NET_BIND_FAILED,
-    MBEDTLS_NET_LISTEN_BACKLOG,
-    MBEDTLS_ERR_NET_LISTEN_FAILED,
-    MBEDTLS_ERR_NET_ACCEPT_FAILED
-};
-
 const unsigned char psk[] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f
@@ -67,15 +54,12 @@ const unsigned char psk[] = {
 
 const char psk_id[] = "Client_identity";
 
+const char unix_socket_name[] = "mbedtls_test_unix_socket";
+
 static int listen_fd;
 static int client_fd;
 
 static int received_sigterm = 0;
-
-#define PORT_BE 0x1151      /* 4433 */
-#define PORT_LE 0x5111
-#define ADDR_BE 0x7f000001  /* 127.0.0.1 */
-#define ADDR_LE 0x0100007f
 
 static void my_debug(void *ctx, int level, const char *file, int line, const char *str) {
     const char *p, *basename;
@@ -128,15 +112,12 @@ static int mbedtls_bind(int* bound_fd) {
     int ret;
     int fd;
 
-    struct sockaddr_in addr;
-    ret = 1; /* for endianness detection */
+    struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = *((char *) &ret) == ret ? PORT_LE : PORT_BE;
-    addr.sin_addr.s_addr = *((char *) &ret) == ret ? ADDR_LE : ADDR_BE;
-    ret = 0;
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, unix_socket_name, sizeof(addr.sun_path)-1);
 
-    fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    fd = (int)socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         ret = MBEDTLS_ERR_NET_SOCKET_FAILED;
         goto out;
@@ -217,8 +198,10 @@ int mbedtls_hardware_poll(void* data, unsigned char* output, size_t len, size_t*
 
 int main(int argc, char* argv[]) {
     int ret = 0, len, written, frags, exchanges_left;
-    unsigned char* buf = 0;
+    unsigned char* buf = NULL;
     size_t psk_len = sizeof(psk);
+
+    unlink(unix_socket_name);
 
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
@@ -256,8 +239,8 @@ int main(int argc, char* argv[]) {
 
     mbedtls_printf(" ok\n");
 
-    /* setup the listening TCP socket */
-    mbedtls_printf("  . Bind on tcp://127.0.0.1:4433/ ...");
+    /* setup the listening socket */
+    mbedtls_printf("  . Bind on UNIX domain socket %s ...", unix_socket_name);
     fflush(stdout);
 
     if ((ret = mbedtls_bind(&listen_fd)) != 0) {
@@ -524,6 +507,8 @@ exit:
 
     mbedtls_fd_cleanup(&client_fd);
     mbedtls_fd_cleanup(&listen_fd);
+
+    unlink(unix_socket_name);
 
     mbedtls_printf(" done.\n");
 
