@@ -31,6 +31,10 @@ int main(void) {
 #include "mbedtls/net_sockets.h"  /* used only for error codes */
 #include "mbedtls/ssl.h"
 
+#include "mbedtls/aes.h"
+#include "mbedtls/gcm.h"
+#include "mbedtls/ssl_internal.h"
+
 #define GET_REQUEST "GET / HTTP/1.0\r\n\r\n"
 
 const unsigned char psk[] = {
@@ -47,12 +51,14 @@ enum exit_codes {
     ssl_config_defaults_failed,
     ssl_setup_failed,
     hostname_failed,
-    socket_failed,
+    socket_failed,                /* 05 */
     connect_failed,
     x509_crt_parse_failed,
     ssl_handshake_failed,
     ssl_write_failed,
-    ssl_read_failed
+    ssl_read_failed,              /* 10 */
+    ssl_context_save_failed,
+    ssl_context_load_failed,
 };
 
 static int recv_cb(void *ctx, unsigned char *buf, size_t len) {
@@ -108,6 +114,9 @@ int mbedtls_hardware_poll(void* data, unsigned char* output, size_t len, size_t*
 int main(void) {
     int ret = exit_ok;
     int server_fd = -1;
+
+    unsigned char buf[512];
+    int bytes_read = 0;
 
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
@@ -165,13 +174,12 @@ int main(void) {
         goto exit;
     }
 
+    /* send HTTP request and receive HTTP response */
     if (mbedtls_ssl_write(&ssl, (const uint8_t*)GET_REQUEST, sizeof(GET_REQUEST) - 1) <= 0) {
         ret = ssl_write_failed;
         goto exit;
     }
 
-    unsigned char buf[200];
-    int bytes_read = 0;
     if ((bytes_read = mbedtls_ssl_read(&ssl, buf, sizeof(buf) - 1)) <= 0) {
         ret = ssl_read_failed;
         goto exit;
@@ -181,6 +189,63 @@ int main(void) {
     mbedtls_printf("Reply from server:\n%s\n", buf);
     fflush(stdout);
 
+    /* serialize the context (it will be de-serialized again to perform another request) */
+    unsigned char* context_buf = NULL;
+    size_t context_buf_len;
+	size_t buf_len;
+
+    if (mbedtls_ssl_context_save(&ssl, NULL, 0, &buf_len) != MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL) {
+        ret = ssl_context_save_failed;
+        goto exit;
+    }
+
+    if ((context_buf = mbedtls_calloc(1, buf_len)) == NULL) {
+        ret = ssl_context_save_failed;
+        goto exit;
+    }
+    context_buf_len = buf_len;
+
+    if (mbedtls_ssl_context_save(&ssl, context_buf, buf_len, &buf_len) != 0) {
+        ret = ssl_context_save_failed;
+        goto exit;
+    }
+
+    /* deserialize the context back */
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_init(&ssl);
+
+    if (mbedtls_ssl_setup(&ssl, &conf) != 0) {
+        ret = ssl_setup_failed;
+        goto exit;
+    }
+
+    mbedtls_ssl_set_bio(&ssl, &server_fd, send_cb, recv_cb, NULL);
+
+    if (mbedtls_ssl_context_load(&ssl, context_buf, buf_len) != 0) {
+        ret = ssl_context_load_failed;
+        goto exit;
+    }
+
+    mbedtls_free(context_buf);
+    context_buf     = NULL;
+    context_buf_len = 0;
+
+    /* again, send HTTP request and receive HTTP response */
+    if (mbedtls_ssl_write(&ssl, (const uint8_t*)GET_REQUEST, sizeof(GET_REQUEST) - 1) <= 0) {
+        ret = ssl_write_failed;
+        goto exit;
+    }
+
+    if ((bytes_read = mbedtls_ssl_read(&ssl, buf, sizeof(buf) - 1)) <= 0) {
+        ret = ssl_read_failed;
+        goto exit;
+    };
+    buf[bytes_read - 1] = '\0';
+
+    mbedtls_printf("[after context serialize/deserialize] Reply from server:\n%s\n", buf);
+    fflush(stdout);
+
+    /* finish */
     mbedtls_ssl_close_notify(&ssl);
 
 exit:

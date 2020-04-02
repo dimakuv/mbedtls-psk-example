@@ -37,7 +37,7 @@ int main(void) {
 
 #define DFL_RESPONSE_SIZE       256
 #define DFL_READ_TIMEOUT        0
-#define DFL_EXCHANGES           1
+#define DFL_EXCHANGES           2
 
 #define HTTP_RESPONSE \
     "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n" \
@@ -45,7 +45,7 @@ int main(void) {
     "<p>Successful connection using: %s</p>\r\n"
 
 /* size of the basic I/O buffer, able to hold our default response */
-#define DFL_IO_BUF_LEN 200
+#define DFL_IO_BUF_LEN 512
 
 const unsigned char psk[] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
